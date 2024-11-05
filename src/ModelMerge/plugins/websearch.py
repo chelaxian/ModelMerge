@@ -31,10 +31,18 @@ def url_to_markdown(url):
             text = httpx.get(url, verify=False, timeout=5).text
             if text == "":
                 return "抱歉，目前无法访问该网页。"
-            body = lxml.html.fromstring(text).xpath('//body')
+            # body = lxml.html.fromstring(text).xpath('//body')
+
+            doc = lxml.html.fromstring(text)
+            # 检查是否是GitHub raw文件格式（body > pre）
+            if doc.xpath('//body/pre'):
+                return text  # 直接返回原始文本，保留格式
+
+            body = doc.xpath('//body')
             if body == [] and text != "":
                 body = text
-                return body
+                return f'<pre>{body}</pre>'
+                # return body
             else:
                 body = body[0]
                 body = Cleaner(javascript=True, style=True).clean_html(body)
