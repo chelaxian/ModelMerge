@@ -207,7 +207,7 @@ class vertex(BaseLLM):
             ],
         }
         if self.print_log:
-            replaced_text = json.loads(re.sub(r'/9j/([A-Za-z0-9+/=]+)', '/9j/***', json.dumps(json_post)))
+            replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
             print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
 
         url = self.api_url.format(model=model or self.engine, stream="streamGenerateContent", api_key=self.api_key)
@@ -336,7 +336,7 @@ class vertex(BaseLLM):
                     pass
 
         if self.print_log:
-            replaced_text = json.loads(re.sub(r'/9j/([A-Za-z0-9+/=]+)', '/9j/***', json.dumps(json_post)))
+            replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
             print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
 
         url = "https://us-central1-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/us-central1/publishers/google/models/{MODEL_ID}:{stream}".format(PROJECT_ID=os.environ.get("VERTEX_PROJECT_ID"), MODEL_ID=model, stream="streamGenerateContent")

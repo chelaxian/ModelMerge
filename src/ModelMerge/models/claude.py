@@ -353,7 +353,7 @@ class claude3(BaseLLM):
                     pass
 
         if self.print_log:
-            replaced_text = json.loads(re.sub(r'/9j/([A-Za-z0-9+/=]+)', '/9j/***', json.dumps(json_post)))
+            replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
             print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
 
         try:
@@ -511,7 +511,7 @@ class claude3(BaseLLM):
                     pass
 
         if self.print_log:
-            replaced_text = json.loads(re.sub(r'/9j/([A-Za-z0-9+/=]+)', '/9j/***', json.dumps(json_post)))
+            replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
             print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
 
         try:
