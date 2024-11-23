@@ -235,5 +235,44 @@ def safe_get(data, *keys, default=None):
             return default
     return data
 
+import asyncio
+def async_generator_to_sync(async_gen):
+    """
+    将异步生成器转换为同步生成器的工具函数
+
+    Args:
+        async_gen: 异步生成器函数
+
+    Yields:
+        异步生成器产生的每个值
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        async def collect_chunks():
+            chunks = []
+            async for chunk in async_gen:
+                chunks.append(chunk)
+            return chunks
+
+        chunks = loop.run_until_complete(collect_chunks())
+        for chunk in chunks:
+            yield chunk
+
+    except Exception as e:
+        print(f"Error during async execution: {e}")
+        raise
+    finally:
+        try:
+            # 清理所有待处理的任务
+            tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            if tasks:
+                loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+
 if __name__ == "__main__":
     os.system("clear")

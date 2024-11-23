@@ -6,8 +6,8 @@ import tiktoken
 import requests
 
 from .base import BaseLLM
-from ..plugins import PLUGINS, get_tools_result, get_tools_result_async
-from ..utils.scripts import check_json, safe_get
+from ..plugins import PLUGINS, get_tools_result_async
+from ..utils.scripts import check_json, safe_get, async_generator_to_sync
 from ..tools import claude_tools_list
 
 class claudeConversation(dict):
@@ -445,7 +445,26 @@ class claude3(BaseLLM):
             print("function_full_response", function_full_response)
             function_response = ""
             function_call_max_tokens = int(self.truncate_limit / 2)
-            function_response = yield from get_tools_result(function_call_name, function_full_response, function_call_max_tokens, self.engine, claude3, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language)
+
+            # function_response = yield from get_tools_result(function_call_name, function_full_response, function_call_max_tokens, self.engine, claude3, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language)
+
+            async def run_async():
+                nonlocal function_response
+                async for chunk in get_tools_result_async(
+                    function_call_name, function_full_response, function_call_max_tokens,
+                    model or self.engine, claude3, kwargs.get('api_key', self.api_key),
+                    self.api_url, use_plugins=False, model=model or self.engine,
+                    add_message=self.add_to_conversation, convo_id=convo_id, language=language
+                ):
+                    if "function_response:" in chunk:
+                        function_response = chunk.replace("function_response:", "")
+                    else:
+                        yield chunk
+
+            # 使用封装后的函数
+            for chunk in async_generator_to_sync(run_async()):
+                yield chunk
+
             response_role = "assistant"
             if self.conversation[convo_id][-1]["role"] == "function" and self.conversation[convo_id][-1]["name"] == "get_search_results":
                 mess = self.conversation[convo_id].pop(-1)

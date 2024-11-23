@@ -82,7 +82,7 @@ All the code related to plugins is in the git submodule ModelMerge within this r
 
 3. Add key-value pairs to the `PLUGINS` dictionary in `ModelMerge/src/ModelMerge/plugins/config.py`. The key is the name of the plugin, and the value is the environment variable of the plugin and its default value. This default value is the switch for the plugin; if the default value is `True`, then the plugin is enabled by default. If the default value is `False`, then the plugin is disabled by default and needs to be manually enabled by the user in the `/info` command.
 
-4. Finally, in the `ModelMerge/src/ModelMerge/plugins/config.py` functions `get_tools_result_async` and `get_tools_result`, add the code for plugin invocation. When the robot needs to call a plugin, it will call this function. You need to add the plugin invocation code within this function.
+4. Finally, in the `ModelMerge/src/ModelMerge/plugins/config.py` functions `get_tools_result_async`, add the code for plugin invocation. When the robot needs to call a plugin, it will call this function. You need to add the plugin invocation code within this function.
 
 After completing the above steps, your plugin will be ready to use. 🎉
 

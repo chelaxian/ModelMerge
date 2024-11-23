@@ -9,11 +9,12 @@ from typing import Set
 import httpx
 import requests
 import tiktoken
+import asyncio
 
 from .base import BaseLLM
-from ..utils.scripts import check_json, safe_get
+from ..utils.scripts import check_json, safe_get, async_generator_to_sync
 from ..tools import function_call_list
-from ..plugins import PLUGINS, get_tools_result, get_tools_result_async
+from ..plugins import PLUGINS, get_tools_result_async
 
 def get_filtered_keys_from_object(obj: object, *keys: str) -> Set[str]:
     """
@@ -546,7 +547,26 @@ class chatgpt(BaseLLM):
                 if function_call_max_tokens <= 0:
                     function_call_max_tokens = int(self.truncate_limit / 2)
                 print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
-                function_response = yield from get_tools_result(function_call_name, function_full_response, function_call_max_tokens, model or self.engine, chatgpt, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language)
+
+                # # function_response = yield from get_tools_result(function_call_name, function_full_response, function_call_max_tokens, model or self.engine, chatgpt, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language)
+
+                async def run_async():
+                    nonlocal function_response
+                    async for chunk in get_tools_result_async(
+                        function_call_name, function_full_response, function_call_max_tokens,
+                        model or self.engine, chatgpt, kwargs.get('api_key', self.api_key),
+                        self.api_url, use_plugins=False, model=model or self.engine,
+                        add_message=self.add_to_conversation, convo_id=convo_id, language=language
+                    ):
+                        if "function_response:" in chunk:
+                            function_response = chunk.replace("function_response:", "")
+                        else:
+                            yield chunk
+
+                # 使用封装后的函数
+                for chunk in async_generator_to_sync(run_async()):
+                    yield chunk
+
             else:
                 function_response = "无法找到相关信息，停止使用 tools"
             response_role = "tool"

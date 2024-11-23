@@ -73,7 +73,7 @@ def url_to_markdown(url):
     # 转换为Markdown
     markdown_content = get_md(body_content)
 
-    return markdown_content
+    return "URL Source: " + url + "\n\ntext: " + markdown_content
 
 def jina_ai_Web_crawler(url: str, isSearch=False) -> str:
     """返回链接网址url正文内容，必须是合法的网址"""
