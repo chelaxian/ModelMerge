@@ -337,8 +337,6 @@ class chatgpt(BaseLLM):
                     del json_post_body[key]
             if json_post_body["messages"][0]["role"] == "system":
                 json_post_body["messages"].pop(0)
-            del json_post_body["stream_options"]
-            del json_post_body["stream"]
 
         plugins = kwargs.get("plugins", PLUGINS)
         if all(value == False for value in plugins.values()) or self.use_plugins == False:
@@ -387,6 +385,7 @@ class chatgpt(BaseLLM):
 
         if "o1-preview" in model or "o1-mini" in model:
             del json_post["max_tokens"]
+            json_post["max_completion_tokens"] = model_max_tokens
             del json_post["tools"]
             del json_post["tool_choice"]
 
@@ -624,6 +623,7 @@ class chatgpt(BaseLLM):
 
         if "o1-preview" in model or "o1-mini" in model:
             del json_post["max_tokens"]
+            json_post["max_completion_tokens"] = model_max_tokens
             del json_post["tools"]
             del json_post["tool_choice"]
 
@@ -723,23 +723,11 @@ class chatgpt(BaseLLM):
                     else:
                         raise Exception(f"response is None, please check the connection or network.")
 
-                    if "o1-preview" in model or "o1-mini" in model:
-                        await response.aread()
-                        line = response.text
-                        line = json.loads(line)
-                        # print(line)
-                        full_response = safe_get(line, "choices", 0, "message", "content")
-                        if full_response:
-                            yield full_response
-                        else:
-                            yield str(line)
-                        break
-
                     async for line in response.aiter_lines():
                         line = line.strip()
                         if not line or line.startswith(':'):
                             continue
-                        # print(line)
+                        # print("line", line)
                         if line.startswith('data:'):
                             line = line.lstrip("data: ")
                             if line == "[DONE]":
