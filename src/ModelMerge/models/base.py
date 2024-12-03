@@ -109,7 +109,6 @@ class BaseLLM:
         else:
             self.aclient = httpx.AsyncClient(
                 follow_redirects=True,
-                proxies=proxy,
                 timeout=timeout,
             )
 
