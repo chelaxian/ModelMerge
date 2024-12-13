@@ -188,6 +188,7 @@ class gemini(BaseLLM):
                 if line and '\"text\": \"' in line:
                     content = line.split('\"text\": \"')[1][:-1]
                     content = "\n".join(content.split("\\n"))
+                    content = content.encode('utf-8').decode('unicode-escape')
                     full_response += content
                     yield content
         except requests.exceptions.ChunkedEncodingError as e:
