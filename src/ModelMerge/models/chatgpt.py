@@ -317,17 +317,17 @@ class chatgpt(BaseLLM):
         body = {
             # kwargs
             "temperature": kwargs.get("temperature", self.temperature),
-            "top_p": kwargs.get("top_p", self.top_p),
-            "presence_penalty": kwargs.get(
-                "presence_penalty",
-                self.presence_penalty,
-            ),
-            "frequency_penalty": kwargs.get(
-                "frequency_penalty",
-                self.frequency_penalty,
-            ),
-            "n": kwargs.get("n", self.reply_count),
-            "user": role,
+            # "top_p": kwargs.get("top_p", self.top_p),
+            # "presence_penalty": kwargs.get(
+            #     "presence_penalty",
+            #     self.presence_penalty,
+            # ),
+            # "frequency_penalty": kwargs.get(
+            #     "frequency_penalty",
+            #     self.frequency_penalty,
+            # ),
+            # "n": kwargs.get("n", self.reply_count),
+            # "user": role,
         }
         json_post_body.update(copy.deepcopy(body))
 
