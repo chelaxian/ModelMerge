@@ -2,19 +2,19 @@ import os
 import re
 import json
 import copy
-from typing import Union
-from pathlib import Path
-from typing import Set
-
 import httpx
 import requests
 import tiktoken
-import asyncio
+from typing import Set
+from typing import Union
+from pathlib import Path
+
 
 from .base import BaseLLM
-from ..utils.scripts import check_json, safe_get, async_generator_to_sync
 from ..tools import function_call_list
 from ..plugins import PLUGINS, get_tools_result_async
+from ..utils.scripts import check_json, safe_get, async_generator_to_sync
+from ..core.request import prepare_request_payload
 
 def get_filtered_keys_from_object(obj: object, *keys: str) -> Set[str]:
     """
@@ -154,7 +154,7 @@ class chatgpt(BaseLLM):
         if total_tokens:
             self.tokens_usage[convo_id] += total_tokens
 
-    def __truncate_conversation(self, convo_id: str = "default") -> None:
+    def truncate_conversation(self, convo_id: str = "default") -> None:
         """
         Truncate the conversation
         """
@@ -169,50 +169,35 @@ class chatgpt(BaseLLM):
             else:
                 break
 
-    def truncate_conversation(
-        self,
-        prompt: str,
-        role: str = "user",
-        convo_id: str = "default",
-        model: str = "",
-        pass_history: int = 9999,
-        **kwargs,
-    ) -> None:
-        """
-        Truncate the conversation
-        """
-        while True:
-            json_post = self.get_post_body(prompt, role, convo_id, model, pass_history, **kwargs)
-            # url = self.api_url.chat_url
-            # if "gpt-4" in self.engine or "claude" in self.engine or (CUSTOM_MODELS and self.engine in CUSTOM_MODELS):
-            # message_token = {
-            #     "total": 0,
-            # }
-            try:
-                message_token = {
-                    "total": self.get_token_count(convo_id),
-                }
-                if "gpt-3.5" in self.engine:
-                    message_token = self.get_message_token(self.api_url, json_post)
-            except:
-                print('\033[31m')
-                print("error: get_message_token")
-                print('\033[0m')
-                message_token = {
-                    "total": 0,
-                }
-            if self.print_log:
-                print("message_token", message_token, "truncate_limit", self.truncate_limit)
-            if (
-                message_token["total"] > self.truncate_limit
-                and len(self.conversation[convo_id]) > 1
-            ):
-                # Don't remove the first message
-                mess = self.conversation[convo_id].pop(1)
-                print("Truncate message:", mess)
-            else:
-                break
-        return json_post, message_token
+    # def truncate_conversation(self, convo_id: str = "default") -> None:
+    #     """
+    #     Truncate the conversation
+    #     """
+    #     while True:
+
+    #         try:
+    #             message_token = {
+    #                 "total": self.get_token_count(convo_id),
+    #             }
+    #         except:
+    #             print('\033[31m')
+    #             print("error: get_message_token")
+    #             print('\033[0m')
+    #             message_token = {
+    #                 "total": 0,
+    #             }
+    #         if self.print_log:
+    #             print("message_token", message_token, "truncate_limit", self.truncate_limit)
+    #         if (
+    #             message_token["total"] > self.truncate_limit
+    #             and len(self.conversation[convo_id]) > 1
+    #         ):
+    #             # Don't remove the first message
+    #             mess = self.conversation[convo_id].pop(1)
+    #             print("Truncate message:", mess)
+    #         else:
+    #             break
+    #     return json_post, message_token
 
     def extract_values(self, obj):
         if isinstance(obj, dict):
@@ -229,73 +214,33 @@ class chatgpt(BaseLLM):
         """
         Get token count
         """
-        encoding = tiktoken.get_encoding("cl100k_base")
+        # encoding = tiktoken.get_encoding("cl100k_base")
 
-        num_tokens = 0
-        for message in self.conversation[convo_id]:
-            # every message follows <im_start>{role/name}\n{content}<im_end>\n
-            num_tokens += 5
-            for key, value in message.items():
-                values = list(self.extract_values(value))
-                if "image_url" in values:
-                    continue
-                if values:
-                    for value in values:
-                        # print("value", value)
-                        try:
-                            num_tokens += len(encoding.encode(value))
-                        except:
-                            print('\033[31m')
-                            print("error value:", value)
-                            print('\033[0m')
-                            num_tokens += 0
-                if key == "name":  # if there's a name, the role is omitted
-                    num_tokens += 5  # role is always required and always 1 token
-        num_tokens += 5  # every reply is primed with <im_start>assistant
+        # num_tokens = 0
+        # for message in self.conversation[convo_id]:
+        #     # every message follows <im_start>{role/name}\n{content}<im_end>\n
+        #     num_tokens += 5
+        #     for key, value in message.items():
+        #         values = list(self.extract_values(value))
+        #         if "image_url" in values:
+        #             continue
+        #         if values:
+        #             for value in values:
+        #                 # print("value", value)
+        #                 try:
+        #                     num_tokens += len(encoding.encode(value))
+        #                 except:
+        #                     print('\033[31m')
+        #                     print("error value:", value)
+        #                     print('\033[0m')
+        #                     num_tokens += 0
+        #         if key == "name":  # if there's a name, the role is omitted
+        #             num_tokens += 5  # role is always required and always 1 token
+        # num_tokens += 5  # every reply is primed with <im_start>assistant
+        num_tokens = self.tokens_usage[convo_id]
         return num_tokens
 
-    def get_message_token(self, url, json_post):
-        json_post["max_tokens"] = 17000
-        headers = {"Authorization": f"Bearer {os.environ.get('API', None)}"}
-        response = requests.Session().post(
-            url,
-            headers=headers,
-            json=json_post,
-            timeout=None,
-        )
-        if response.status_code != 200:
-            print(response.text)
-            json_response = json.loads(response.text)
-            string = json_response["error"]["message"]
-            # print(json_response)
-            try:
-                string = re.findall(r"\((.*?)\)", string)[0]
-            except:
-                if "You exceeded your current quota" in json_response:
-                    raise Exception("当前账号余额不足！")
-            numbers = re.findall(r"\d+\.?\d*", string)
-            numbers = [int(i) for i in numbers]
-            if len(numbers) == 2:
-                return {
-                    "messages": numbers[0],
-                    "total": numbers[0],
-                }
-            elif len(numbers) == 3:
-                return {
-                    "messages": numbers[0],
-                    "functions": numbers[1],
-                    "total": numbers[0] + numbers[1],
-                }
-            else:
-                raise Exception(json_post, json_response)
-        # print("response.text", response.text)
-        return {
-            "messages": 0,
-            "total": 0,
-        }
-
-
-    def get_post_body(
+    async def get_post_body(
         self,
         prompt: str,
         role: str = "user",
@@ -305,49 +250,51 @@ class chatgpt(BaseLLM):
         **kwargs,
     ):
         self.conversation[convo_id][0] = {"role": "system","content": self.system_prompt}
-        json_post_body = {
+
+        # 构造 provider 信息
+        provider = {
+            "provider": "openai",
+            "base_url": kwargs.get('api_url', self.api_url.chat_url),
+            "api": kwargs.get('api_key', self.api_key),
+            "model": [model or self.engine],
+            "tools": True if self.use_plugins else False,
+            "image": True
+        }
+
+        # 构造请求数据
+        request_data = {
             "model": model or self.engine,
-            "messages": copy.deepcopy(self.conversation[convo_id]) if pass_history else [{"role": "system","content": self.system_prompt},{"role": role, "content": prompt}],
-            "max_tokens": 5000,
+            "messages": copy.deepcopy(self.conversation[convo_id]) if pass_history else [
+                {"role": "system","content": self.system_prompt},
+                {"role": role, "content": prompt}
+            ],
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "stream": True,
             "stream_options": {
                 "include_usage": True
-            }
+            },
+            "temperature": kwargs.get("temperature", self.temperature)
         }
-        body = {
-            # kwargs
-            "temperature": kwargs.get("temperature", self.temperature),
-            # "top_p": kwargs.get("top_p", self.top_p),
-            # "presence_penalty": kwargs.get(
-            #     "presence_penalty",
-            #     self.presence_penalty,
-            # ),
-            # "frequency_penalty": kwargs.get(
-            #     "frequency_penalty",
-            #     self.frequency_penalty,
-            # ),
-            # "n": kwargs.get("n", self.reply_count),
-            # "user": role,
-        }
-        json_post_body.update(copy.deepcopy(body))
 
-        if "o1-preview" in model or "o1-mini" in model:
-            for key in body.keys():
-                if key in json_post_body:
-                    del json_post_body[key]
-            if json_post_body["messages"][0]["role"] == "system":
-                json_post_body["messages"].pop(0)
-
+        # 添加工具相关信息
         plugins = kwargs.get("plugins", PLUGINS)
-        if all(value == False for value in plugins.values()) or self.use_plugins == False:
-            return json_post_body
-        json_post_body.update(copy.deepcopy(function_call_list["base"]))
-        for item in plugins.keys():
-            try:
-                if plugins[item]:
-                    json_post_body["tools"].append({"type": "function", "function": function_call_list[item]})
-            except:
-                pass
+        if not (all(value == False for value in plugins.values()) or self.use_plugins == False):
+            tools = []
+            # tools.append(copy.deepcopy(function_call_list["base"]))
+            for item in plugins.keys():
+                try:
+                    if plugins[item]:
+                        tools.append({"type": "function", "function": function_call_list[item]})
+                except:
+                    pass
+            if tools:
+                request_data["tools"] = tools
+                request_data["tool_choice"] = "auto"
+
+        # print("request_data", json.dumps(request_data, indent=4, ensure_ascii=False))
+
+        # 调用核心模块的 prepare_request_payload 函数
+        url, headers, json_post_body = await prepare_request_payload(provider, request_data)
 
         return json_post_body
 
@@ -374,32 +321,23 @@ class chatgpt(BaseLLM):
         if convo_id not in self.conversation or pass_history <= 2:
             self.reset(convo_id=convo_id, system_prompt=system_prompt)
         self.add_to_conversation(prompt, role, convo_id=convo_id, function_name=function_name, total_tokens=total_tokens, function_arguments=function_arguments, function_call_id=function_call_id, pass_history=pass_history)
-        json_post, message_token = self.truncate_conversation(prompt, role, convo_id, model, pass_history, **kwargs)
+
+        # 创建异步包装函数获取 post body
+        json_post = None
+
+        async def get_post_body_async():
+            nonlocal json_post
+            return await self.get_post_body(prompt, role, convo_id, model, pass_history, **kwargs)
+
+        # 使用封装后的函数
+        json_post = next(async_generator_to_sync(get_post_body_async()))
+
+        self.truncate_conversation(convo_id=convo_id)
         # print(self.conversation[convo_id])
-        model_max_tokens = kwargs.get("max_tokens", self.max_tokens)
         if self.print_log:
-            print("model_max_tokens", model_max_tokens)
             print("api_url", kwargs.get('api_url', self.api_url.chat_url))
             print("api_key", kwargs.get('api_key', self.api_key))
-        json_post["max_tokens"] = model_max_tokens
 
-        if "o1-preview" in model or "o1-mini" in model:
-            del json_post["max_tokens"]
-            json_post["max_completion_tokens"] = model_max_tokens
-            del json_post["tools"]
-            del json_post["tool_choice"]
-
-        # print("api_url", self.api_url.chat_url)
-        # if "tools" in json_post:
-        #     del json_post["tools"]
-        # if "tool_choice" in json_post:
-        #     del json_post["tool_choice"]
-        # for index, mess in enumerate(json_post["messages"]):
-        #     if type(mess["content"]) == list and "text" in mess["content"][0]:
-        #         json_post["messages"][index] = {
-        #             "role": mess["role"],
-        #             "content": mess["content"][0]["text"]
-        #         }
         for _ in range(3):
             if self.print_log:
                 replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
@@ -542,7 +480,7 @@ class chatgpt(BaseLLM):
             else:
                 self.function_calls_counter[function_call_name] += 1
             if self.function_calls_counter[function_call_name] <= self.function_call_max_loop and function_full_response != "{}":
-                function_call_max_tokens = self.truncate_limit - message_token["total"] - 1000
+                function_call_max_tokens = self.truncate_limit - 1000
                 if function_call_max_tokens <= 0:
                     function_call_max_tokens = int(self.truncate_limit / 2)
                 print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
@@ -612,32 +550,13 @@ class chatgpt(BaseLLM):
         if convo_id not in self.conversation or pass_history <= 2:
             self.reset(convo_id=convo_id, system_prompt=system_prompt)
         self.add_to_conversation(prompt, role, convo_id=convo_id, function_name=function_name, total_tokens=total_tokens, function_arguments=function_arguments, pass_history=pass_history, function_call_id=function_call_id)
-        json_post, message_token = self.truncate_conversation(prompt, role, convo_id, model, pass_history, **kwargs)
+        json_post = await self.get_post_body(prompt, role, convo_id, model, pass_history, **kwargs)
+        self.truncate_conversation(convo_id=convo_id)
         # print(self.conversation[convo_id])
-        model_max_tokens = kwargs.get("max_tokens", self.max_tokens)
         if self.print_log:
-            print("model_max_tokens", model_max_tokens)
             print("api_url", kwargs.get('api_url', self.api_url.chat_url))
             print("api_key", kwargs.get('api_key', self.api_key))
-        json_post["max_tokens"] = model_max_tokens
 
-        if "o1-preview" in model or "o1-mini" in model:
-            del json_post["max_tokens"]
-            json_post["max_completion_tokens"] = model_max_tokens
-            del json_post["tools"]
-            del json_post["tool_choice"]
-
-        # print("api_url", self.api_url.chat_url)
-        # if "tools" in json_post:
-        #     del json_post["tools"]
-        # if "tool_choice" in json_post:
-        #     del json_post["tool_choice"]
-        # for index, mess in enumerate(json_post["messages"]):
-        #     if type(mess["content"]) == list and "text" in mess["content"][0]:
-        #         json_post["messages"][index] = {
-        #             "role": mess["role"],
-        #             "content": mess["content"][0]["text"]
-        #         }
         response_role: str = None
         full_response: str = ""
         function_full_response: str = ""
@@ -790,7 +709,7 @@ class chatgpt(BaseLLM):
             else:
                 self.function_calls_counter[function_call_name] += 1
             if self.function_calls_counter[function_call_name] <= self.function_call_max_loop and (function_full_response != "{}" or function_call_name == "get_date_time_weekday"):
-                function_call_max_tokens = self.truncate_limit - message_token["total"] - 1000
+                function_call_max_tokens = self.truncate_limit - 1000
                 if function_call_max_tokens <= 0:
                     function_call_max_tokens = int(self.truncate_limit / 2)
                 print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
@@ -861,6 +780,7 @@ class chatgpt(BaseLLM):
         self.conversation[convo_id] = [
             {"role": "system", "content": self.system_prompt},
         ]
+        self.tokens_usage[convo_id] = 0
 
     def save(self, file: str, *keys: str) -> None:
         """
