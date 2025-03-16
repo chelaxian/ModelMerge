@@ -4,7 +4,6 @@ import json
 import copy
 import httpx
 import requests
-import tiktoken
 from typing import Set
 from typing import Union
 from pathlib import Path
@@ -75,7 +74,7 @@ class chatgpt(BaseLLM):
         self.function_calls_counter = {}
         self.function_call_max_loop = 3
 
-        if self.get_token_count("default") > self.max_tokens:
+        if self.tokens_usage["default"] > self.max_tokens:
             raise Exception("System prompt is too long")
 
     def add_to_conversation(
@@ -160,7 +159,7 @@ class chatgpt(BaseLLM):
         """
         while True:
             if (
-                self.get_token_count(convo_id) > self.truncate_limit
+                self.tokens_usage[convo_id] > self.truncate_limit
                 and len(self.conversation[convo_id]) > 1
             ):
                 # Don't remove the first message
@@ -168,36 +167,6 @@ class chatgpt(BaseLLM):
                 print("Truncate message:", mess)
             else:
                 break
-
-    # def truncate_conversation(self, convo_id: str = "default") -> None:
-    #     """
-    #     Truncate the conversation
-    #     """
-    #     while True:
-
-    #         try:
-    #             message_token = {
-    #                 "total": self.get_token_count(convo_id),
-    #             }
-    #         except:
-    #             print('\033[31m')
-    #             print("error: get_message_token")
-    #             print('\033[0m')
-    #             message_token = {
-    #                 "total": 0,
-    #             }
-    #         if self.print_log:
-    #             print("message_token", message_token, "truncate_limit", self.truncate_limit)
-    #         if (
-    #             message_token["total"] > self.truncate_limit
-    #             and len(self.conversation[convo_id]) > 1
-    #         ):
-    #             # Don't remove the first message
-    #             mess = self.conversation[convo_id].pop(1)
-    #             print("Truncate message:", mess)
-    #         else:
-    #             break
-    #     return json_post, message_token
 
     def extract_values(self, obj):
         if isinstance(obj, dict):
@@ -208,37 +177,6 @@ class chatgpt(BaseLLM):
                 yield from self.extract_values(item)
         else:
             yield obj
-
-    # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
-    def get_token_count(self, convo_id: str = "default") -> int:
-        """
-        Get token count
-        """
-        # encoding = tiktoken.get_encoding("cl100k_base")
-
-        # num_tokens = 0
-        # for message in self.conversation[convo_id]:
-        #     # every message follows <im_start>{role/name}\n{content}<im_end>\n
-        #     num_tokens += 5
-        #     for key, value in message.items():
-        #         values = list(self.extract_values(value))
-        #         if "image_url" in values:
-        #             continue
-        #         if values:
-        #             for value in values:
-        #                 # print("value", value)
-        #                 try:
-        #                     num_tokens += len(encoding.encode(value))
-        #                 except:
-        #                     print('\033[31m')
-        #                     print("error value:", value)
-        #                     print('\033[0m')
-        #                     num_tokens += 0
-        #         if key == "name":  # if there's a name, the role is omitted
-        #             num_tokens += 5  # role is always required and always 1 token
-        # num_tokens += 5  # every reply is primed with <im_start>assistant
-        num_tokens = self.tokens_usage[convo_id]
-        return num_tokens
 
     async def get_post_body(
         self,
@@ -298,6 +236,208 @@ class chatgpt(BaseLLM):
 
         return json_post_body
 
+    async def _process_stream_response(
+        self,
+        response_gen,
+        convo_id="default",
+        function_name="",
+        total_tokens=0,
+        function_arguments="",
+        function_call_id="",
+        model="",
+        language="English",
+        system_prompt=None,
+        pass_history=9999,
+        is_async=False,
+        **kwargs
+    ):
+        """
+        处理流式响应的共用逻辑
+
+        :param response_gen: 响应生成器(同步或异步)
+        :param is_async: 是否使用异步模式
+        """
+        response_role = None
+        full_response = ""
+        function_full_response = ""
+        function_call_name = ""
+        need_function_call = False
+
+        # 处理单行数据的公共逻辑
+        def process_line(line):
+            nonlocal response_role, full_response, function_full_response, function_call_name, need_function_call, total_tokens, function_call_id
+
+            if not line or (isinstance(line, str) and line.startswith(':')):
+                return None
+
+            if isinstance(line, str) and line.startswith('data:'):
+                line = line.lstrip("data: ")
+                if line == "[DONE]":
+                    return "DONE"
+            elif isinstance(line, (dict, list)):
+                if isinstance(line, dict) and safe_get(line, "choices", 0, "message", "content"):
+                    full_response = line["choices"][0]["message"]["content"]
+                    return full_response
+                else:
+                    return str(line)
+            else:
+                try:
+                    if isinstance(line, str):
+                        line = json.loads(line)
+                        if safe_get(line, "choices", 0, "message", "content"):
+                            full_response = line["choices"][0]["message"]["content"]
+                            return full_response
+                        else:
+                            return str(line)
+                except:
+                    print("json.loads error:", repr(line))
+                    return None
+
+            resp = json.loads(line) if isinstance(line, str) else line
+            if "error" in resp:
+                raise Exception(f"{resp}")
+
+            total_tokens = total_tokens or safe_get(resp, "usage", "total_tokens", default=0)
+            delta = safe_get(resp, "choices", 0, "delta")
+            if not delta:
+                return None
+
+            response_role = response_role or safe_get(delta, "role")
+            if safe_get(delta, "content"):
+                need_function_call = False
+                content = delta["content"]
+                full_response += content
+                return content
+
+            if safe_get(delta, "tool_calls"):
+                need_function_call = True
+                function_call_name = function_call_name or safe_get(delta, "tool_calls", 0, "function", "name")
+                function_full_response += safe_get(delta, "tool_calls", 0, "function", "arguments", default="")
+                function_call_id = function_call_id or safe_get(delta, "tool_calls", 0, "id")
+                return None
+
+        # 处理流式响应
+        async def process_async():
+            nonlocal response_role, full_response, function_full_response, function_call_name, need_function_call, total_tokens, function_call_id
+
+            async for line in response_gen:
+                line = line.strip() if isinstance(line, str) else line
+                result = process_line(line)
+                if result == "DONE":
+                    break
+                elif result:
+                    yield result
+
+        def process_sync():
+            nonlocal response_role, full_response, function_full_response, function_call_name, need_function_call, total_tokens, function_call_id
+
+            for line in response_gen:
+                line = line.decode("utf-8") if hasattr(line, "decode") else line
+                result = process_line(line)
+                if result == "DONE":
+                    break
+                elif result:
+                    yield result
+
+        # 使用同步或异步处理器处理响应
+        if is_async:
+            async for chunk in process_async():
+                yield chunk
+        else:
+            for chunk in process_sync():
+                yield chunk
+
+        if self.print_log:
+            print("\n\rtotal_tokens", total_tokens)
+
+        if response_role is None:
+            response_role = "assistant"
+
+        # 处理函数调用
+        if need_function_call:
+            function_full_response = check_json(function_full_response)
+            print("function_full_response", function_full_response)
+            function_response = ""
+
+            if not self.function_calls_counter.get(function_call_name):
+                self.function_calls_counter[function_call_name] = 1
+            else:
+                self.function_calls_counter[function_call_name] += 1
+
+            if self.function_calls_counter[function_call_name] <= self.function_call_max_loop and (function_full_response != "{}" or function_call_name == "get_date_time_weekday"):
+                function_call_max_tokens = self.truncate_limit - 1000
+                if function_call_max_tokens <= 0:
+                    function_call_max_tokens = int(self.truncate_limit / 2)
+                print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
+
+                # 处理函数调用结果
+                if is_async:
+                    async for chunk in get_tools_result_async(
+                        function_call_name, function_full_response, function_call_max_tokens,
+                        model or self.engine, chatgpt, kwargs.get('api_key', self.api_key),
+                        self.api_url, use_plugins=False, model=model or self.engine,
+                        add_message=self.add_to_conversation, convo_id=convo_id, language=language
+                    ):
+                        if "function_response:" in chunk:
+                            function_response = chunk.replace("function_response:", "")
+                        else:
+                            yield chunk
+                else:
+                    async def run_async():
+                        nonlocal function_response
+                        async for chunk in get_tools_result_async(
+                            function_call_name, function_full_response, function_call_max_tokens,
+                            model or self.engine, chatgpt, kwargs.get('api_key', self.api_key),
+                            self.api_url, use_plugins=False, model=model or self.engine,
+                            add_message=self.add_to_conversation, convo_id=convo_id, language=language
+                        ):
+                            if "function_response:" in chunk:
+                                function_response = chunk.replace("function_response:", "")
+                            else:
+                                yield chunk
+
+                    for chunk in async_generator_to_sync(run_async()):
+                        yield chunk
+            else:
+                function_response = "无法找到相关信息，停止使用 tools"
+
+            response_role = "tool"
+
+            # 递归处理函数调用响应
+            if is_async:
+                async for chunk in self.ask_stream_async(
+                    function_response, response_role, convo_id=convo_id,
+                    function_name=function_call_name, total_tokens=total_tokens,
+                    model=model or self.engine, function_arguments=function_full_response,
+                    function_call_id=function_call_id, api_key=kwargs.get('api_key', self.api_key),
+                    plugins=kwargs.get("plugins", PLUGINS), system_prompt=system_prompt
+                ):
+                    yield chunk
+            else:
+                for chunk in self.ask_stream(
+                    function_response, response_role, convo_id=convo_id,
+                    function_name=function_call_name, total_tokens=total_tokens,
+                    model=model or self.engine, function_arguments=function_full_response,
+                    function_call_id=function_call_id, api_key=kwargs.get('api_key', self.api_key),
+                    plugins=kwargs.get("plugins", PLUGINS), system_prompt=system_prompt
+                ):
+                    yield chunk
+        else:
+            # 添加响应到对话历史
+            self.add_to_conversation(full_response, response_role, convo_id=convo_id, total_tokens=total_tokens, pass_history=pass_history)
+            self.function_calls_counter = {}
+
+            # 清理翻译引擎相关的历史记录
+            if pass_history <= 2 and len(self.conversation[convo_id]) >= 2 \
+            and (
+                "You are a translation engine" in self.conversation[convo_id][-2]["content"] \
+                or "You are a translation engine" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="") \
+                or "你是一位精通简体中文的专业翻译" in self.conversation[convo_id][-2]["content"] \
+                or "你是一位精通简体中文的专业翻译" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="")
+            ):
+                self.conversation[convo_id].pop(-1)
+                self.conversation[convo_id].pop(-1)
+
     def ask_stream(
         self,
         prompt: list,
@@ -314,34 +454,34 @@ class chatgpt(BaseLLM):
         **kwargs,
     ):
         """
-        Ask a question
+        Ask a question (同步流式响应)
         """
-        # Make conversation if it doesn't exist
+        # 准备会话
         self.system_prompt = system_prompt or self.system_prompt
         if convo_id not in self.conversation or pass_history <= 2:
             self.reset(convo_id=convo_id, system_prompt=system_prompt)
         self.add_to_conversation(prompt, role, convo_id=convo_id, function_name=function_name, total_tokens=total_tokens, function_arguments=function_arguments, function_call_id=function_call_id, pass_history=pass_history)
 
-        # 创建异步包装函数获取 post body
+        # 获取请求体
         json_post = None
-
         async def get_post_body_async():
             nonlocal json_post
             return await self.get_post_body(prompt, role, convo_id, model, pass_history, **kwargs)
-
-        # 使用封装后的函数
         json_post = next(async_generator_to_sync(get_post_body_async()))
 
         self.truncate_conversation(convo_id=convo_id)
-        # print(self.conversation[convo_id])
+
+        # 打印日志
         if self.print_log:
             print("api_url", kwargs.get('api_url', self.api_url.chat_url))
             print("api_key", kwargs.get('api_key', self.api_key))
 
+        # 发送请求并处理响应
         for _ in range(3):
             if self.print_log:
                 replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
                 print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
+
             response = None
             try:
                 response = self.session.post(
@@ -355,177 +495,50 @@ class chatgpt(BaseLLM):
                 print("连接错误，请检查服务器状态或网络连接。")
                 return
             except requests.exceptions.ReadTimeout:
-                print("请求超时，请检查网络连接或增加超时时间。{e}")
+                print("请求超时，请检查网络连接或增加超时时间。")
                 return
             except Exception as e:
                 print(f"发生了未预料的错误：{e}")
                 if "Invalid URL" in str(e):
                     e = "You have entered an invalid API URL, please use the correct URL and use the `/start` command to set the API URL again. Specific error is as follows:\n\n" + str(e)
                     raise Exception(f"{e}")
-            # print("response.text", response.text)
-            # print("response.status_code", response.status_code, response.status_code == 503, response != None and response.status_code == 503, response.text[:400])
-            if response != None and (response.status_code == 400 or response.status_code == 422):
-                print("response.text", response.text)
-                if "function calling" in response.text:
-                    if "tools" in json_post:
-                        del json_post["tools"]
-                    if "tool_choice" in json_post:
-                        del json_post["tool_choice"]
-                elif "invalid_request_error" in response.text:
-                    for index, mess in enumerate(json_post["messages"]):
-                        if type(mess["content"]) == list and "text" in mess["content"][0]:
-                            json_post["messages"][index] = {
-                                "role": mess["role"],
-                                "content": mess["content"][0]["text"]
-                            }
-                elif "'function' is not an allowed role" in response.text:
-                    if json_post["messages"][-1]["role"] == "tool":
-                        mess = json_post["messages"][-1]
-                        json_post["messages"][-1] = {
-                            "role": "assistant",
-                            "name": mess["name"],
-                            "content": mess["content"]
-                        }
-                else:
-                    if "tools" in json_post:
-                        del json_post["tools"]
-                    if "tool_choice" in json_post:
-                        del json_post["tool_choice"]
-                continue
-            if response != None and response.status_code == 503:
-                # print("response.text", response.text)
-                if "Sorry, server is busy" in response.text:
-                    for index, mess in enumerate(json_post["messages"]):
-                        if type(mess["content"]) == list and "text" in mess["content"][0]:
-                            json_post["messages"][index] = {
-                                "role": mess["role"],
-                                "content": mess["content"][0]["text"]
-                            }
-                continue
-            if response != None and response.status_code == 200 and "is not possible because the prompts occupy" in response.text:
-                max_tokens = re.findall(r"only\s(\d+)\stokens", response.text)
-                # print("max_tokens", max_tokens)
-                if max_tokens:
-                    json_post["max_tokens"] = int(max_tokens[0])
-                    continue
-            if response != None and response.status_code == 200:
-                if response.text == "":
-                    for index, mess in enumerate(json_post["messages"]):
-                        if type(mess["content"]) == list and "text" in mess["content"][0]:
-                            json_post["messages"][index] = {
-                                "role": mess["role"],
-                                "content": mess["content"][0]["text"]
-                            }
-                    continue
-                else:
-                    break
-        # print("response.status_code", response.status_code, response.text)
+
+            # 处理错误响应
+            if response is not None:
+                if response.status_code in (400, 422, 503):
+                    json_post, should_retry = self._handle_response_error_sync(response, json_post)
+                    if should_retry:
+                        continue
+
+                if response.status_code == 200:
+                    if "is not possible because the prompts occupy" in response.text or response.text == "":
+                        json_post, should_retry = self._handle_response_error_sync(response, json_post)
+                        if should_retry:
+                            continue
+                    else:
+                        break
+
+        # 检查响应状态
         if response != None and response.status_code != 200:
             raise Exception(f"{response.status_code} {response.reason} {response.text[:400]}")
         if response is None:
             raise Exception(f"response is None, please check the connection or network.")
 
-        response_role: str = None
-        full_response: str = ""
-        function_full_response: str = ""
-        function_call_name: str = ""
-        need_function_call: bool = False
-        total_tokens = 0
-        for line in response.iter_lines():
-            line = line.decode("utf-8")
-            if not line or line.startswith(':'):
-                continue
-            # print(line)
-            if line.startswith('data:'):
-                line = line.lstrip("data: ")
-                if line == "[DONE]":
-                    break
-            else:
-                line = json.loads(line)
-                if safe_get(line, "choices", 0, "message", "content"):
-                    full_response = line["choices"][0]["message"]["content"]
-                    yield full_response
-                else:
-                    yield str(line)
-                break
-            resp: dict = json.loads(line)
-            if "error" in resp:
-                raise Exception(f"{resp}")
-            total_tokens = total_tokens or safe_get(resp, "usage", "total_tokens", default=0)
-            delta = safe_get(resp, "choices", 0, "delta")
-            if not delta:
-                continue
-            response_role = response_role or safe_get(delta, "role")
-            if safe_get(delta, "content"):
-                need_function_call = False
-                content = delta["content"]
-                full_response += content
-                yield content
-            if safe_get(delta, "tool_calls"):
-                need_function_call = True
-                function_call_name = function_call_name or safe_get(delta, "tool_calls", 0, "function", "name")
-                function_full_response += safe_get(delta, "tool_calls", 0, "function", "arguments", default="")
-                function_call_id = function_call_id or safe_get(delta, "tool_calls", 0, "id")
-        if self.print_log:
-            print("\n\rtotal_tokens", total_tokens)
-        if response_role == None:
-            response_role = "assistant"
-        if need_function_call:
-            function_full_response = check_json(function_full_response)
-            print("function_full_response", function_full_response)
-            function_response = ""
-            # print(self.function_calls_counter)
-            if not self.function_calls_counter.get(function_call_name):
-                self.function_calls_counter[function_call_name] = 1
-            else:
-                self.function_calls_counter[function_call_name] += 1
-            if self.function_calls_counter[function_call_name] <= self.function_call_max_loop and function_full_response != "{}":
-                function_call_max_tokens = self.truncate_limit - 1000
-                if function_call_max_tokens <= 0:
-                    function_call_max_tokens = int(self.truncate_limit / 2)
-                print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
-
-                # # function_response = yield from get_tools_result(function_call_name, function_full_response, function_call_max_tokens, model or self.engine, chatgpt, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language)
-
-                async def run_async():
-                    nonlocal function_response
-                    async for chunk in get_tools_result_async(
-                        function_call_name, function_full_response, function_call_max_tokens,
-                        model or self.engine, chatgpt, kwargs.get('api_key', self.api_key),
-                        self.api_url, use_plugins=False, model=model or self.engine,
-                        add_message=self.add_to_conversation, convo_id=convo_id, language=language
-                    ):
-                        if "function_response:" in chunk:
-                            function_response = chunk.replace("function_response:", "")
-                        else:
-                            yield chunk
-
-                # 使用封装后的函数
-                for chunk in async_generator_to_sync(run_async()):
-                    yield chunk
-
-            else:
-                function_response = "无法找到相关信息，停止使用 tools"
-            response_role = "tool"
-            # print(self.conversation[convo_id][-1])
-            # if self.conversation[convo_id][-1]["role"] == "tool" and self.conversation[convo_id][-1]["name"] == "get_search_results":
-            #     mess = self.conversation[convo_id].pop(-1)
-                # print("Truncate message:", mess)
-            yield from self.ask_stream(function_response, response_role, convo_id=convo_id, function_name=function_call_name, total_tokens=total_tokens, model=model or self.engine, function_arguments=function_full_response, function_call_id=function_call_id, api_key=kwargs.get('api_key', self.api_key), plugins=kwargs.get("plugins", PLUGINS), system_prompt=system_prompt)
-        else:
-            # if self.conversation[convo_id][-1]["role"] == "tool" and self.conversation[convo_id][-1]["name"] == "get_search_results":
-            #     mess = self.conversation[convo_id].pop(-1)
-            self.add_to_conversation(full_response, response_role, convo_id=convo_id, total_tokens=total_tokens, pass_history=pass_history)
-            self.function_calls_counter = {}
-            if pass_history <= 2 and len(self.conversation[convo_id]) >= 2 \
-            and (
-                "You are a translation engine" in self.conversation[convo_id][-2]["content"] \
-                or "You are a translation engine" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="") \
-                or "你是一位精通简体中文的专业翻译" in self.conversation[convo_id][-2]["content"] \
-                or "你是一位精通简体中文的专业翻译" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="")
-            ):
-                self.conversation[convo_id].pop(-1)
-                self.conversation[convo_id].pop(-1)
+        # 处理响应流
+        return async_generator_to_sync(self._process_stream_response(
+            response.iter_lines(),
+            convo_id=convo_id,
+            function_name=function_name,
+            total_tokens=total_tokens,
+            function_arguments=function_arguments,
+            function_call_id=function_call_id,
+            model=model,
+            language=language,
+            system_prompt=system_prompt,
+            pass_history=pass_history,
+            is_async=False,
+            **kwargs
+        ))
 
     async def ask_stream_async(
         self,
@@ -543,31 +556,29 @@ class chatgpt(BaseLLM):
         **kwargs,
     ):
         """
-        Ask a question
+        Ask a question (异步流式响应)
         """
-        # Make conversation if it doesn't exist
+        # 准备会话
         self.system_prompt = system_prompt or self.system_prompt
         if convo_id not in self.conversation or pass_history <= 2:
             self.reset(convo_id=convo_id, system_prompt=system_prompt)
         self.add_to_conversation(prompt, role, convo_id=convo_id, function_name=function_name, total_tokens=total_tokens, function_arguments=function_arguments, pass_history=pass_history, function_call_id=function_call_id)
+
+        # 获取请求体
         json_post = await self.get_post_body(prompt, role, convo_id, model, pass_history, **kwargs)
         self.truncate_conversation(convo_id=convo_id)
-        # print(self.conversation[convo_id])
+
+        # 打印日志
         if self.print_log:
             print("api_url", kwargs.get('api_url', self.api_url.chat_url))
             print("api_key", kwargs.get('api_key', self.api_key))
 
-        response_role: str = None
-        full_response: str = ""
-        function_full_response: str = ""
-        function_call_name: str = ""
-        need_function_call: bool = False
-        total_tokens = 0
-
+        # 发送请求并处理响应
         for _ in range(3):
             if self.print_log:
                 replaced_text = json.loads(re.sub(r';base64,([A-Za-z0-9+/=]+)', ';base64,***', json.dumps(json_post)))
                 print(json.dumps(replaced_text, indent=4, ensure_ascii=False))
+
             try:
                 async with self.aclient.stream(
                     "post",
@@ -576,171 +587,45 @@ class chatgpt(BaseLLM):
                     json=json_post,
                     timeout=kwargs.get("timeout", self.timeout),
                 ) as response:
-                    # print("response.text", response.text)
-                    if response != None:
-                        # await response.aread()
-                        # print("response.status_code", response.status_code, response.status_code == 200, response != None and response.status_code == 200, response.text == "", response.text[:400])
-                        if response.status_code == 400 or response.status_code == 422:
-                            await response.aread()
-                            print("response.text", response.text)
-                            if "Content did not pass the moral check" in response.text:
-                                raise Exception(f"{response.status_code} {response.reason_phrase} {response.text[:400]}")
-                            if "function calling" in response.text:
-                                if "tools" in json_post:
-                                    del json_post["tools"]
-                                if "tool_choice" in json_post:
-                                    del json_post["tool_choice"]
-                            elif "invalid_request_error" in response.text:
-                                for index, mess in enumerate(json_post["messages"]):
-                                    if safe_get(mess, "content", 0) == "text":
-                                        json_post["messages"][index] = {
-                                            "role": mess["role"],
-                                            "content": mess["content"][0]["text"]
-                                        }
-                            elif "'function' is not an allowed role" in response.text:
-                                if json_post["messages"][-1]["role"] == "tool":
-                                    mess = json_post["messages"][-1]
-                                    json_post["messages"][-1] = {
-                                        "role": "assistant",
-                                        "name": mess["name"],
-                                        "content": mess["content"]
-                                    }
-                            else:
-                                if "tools" in json_post:
-                                    del json_post["tools"]
-                                if "tool_choice" in json_post:
-                                    del json_post["tool_choice"]
-                            continue
-                        if response.status_code == 503:
-                            await response.aread()
-                            # print("response.text", response.text)
-                            if "Sorry, server is busy" in response.text:
-                                for index, mess in enumerate(json_post["messages"]):
-                                    if type(mess["content"]) == list and "text" in mess["content"][0]:
-                                        json_post["messages"][index] = {
-                                            "role": mess["role"],
-                                            "content": mess["content"][0]["text"]
-                                        }
-                            continue
-                        # if response.status_code == 200 and "is not possible because the prompts occupy" in response.text:
-                        #     max_tokens = re.findall(r"only\s(\d+)\stokens", response.text)
-                        #     # print("max_tokens", max_tokens)
-                        #     if max_tokens:
-                        #         json_post["max_tokens"] = int(max_tokens[0])
-                        #         continue
-                        # if response.status_code == 200 and response.text == "":
-                        #     for index, mess in enumerate(json_post["messages"]):
-                        #         if type(mess["content"]) == list and "text" in mess["content"][0]:
-                        #             json_post["messages"][index] = {
-                        #                 "role": mess["role"],
-                        #                 "content": mess["content"][0]["text"]
-                        #             }
-                        #     continue
-                        if response.status_code != 200:
-                            await response.aread()
-                            raise Exception(f"{response.status_code} {response.reason_phrase} {response.text[:400]}")
-                    else:
-                        raise Exception(f"response is None, please check the connection or network.")
+                    if response is None:
+                        raise Exception("Response is None, please check the connection or network.")
 
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line or line.startswith(':'):
+                    # 处理错误响应
+                    if response.status_code in (400, 422, 503):
+                        json_post, should_retry = await self._handle_response_error(response, json_post)
+                        if should_retry:
                             continue
-                        # print("line", line)
-                        if line.startswith('data:'):
-                            line = line.lstrip("data: ")
-                            if line == "[DONE]":
-                                break
-                        else:
-                            try:
-                                line = json.loads(line)
-                                full_response = safe_get(line, "choices", 0, "message", "content")
-                                if full_response:
-                                    yield full_response
-                                else:
-                                    yield line
-                                break
-                            except:
-                                print("json.loads error:", repr(line))
-                                continue
-                        resp: dict = json.loads(line)
-                        if "error" in resp:
-                            raise Exception(f"{resp}")
-                        total_tokens = total_tokens or safe_get(resp, "usage", "total_tokens", default=0)
-                        delta = safe_get(resp, "choices", 0, "delta")
-                        if not delta:
-                            continue
-                        response_role = response_role or safe_get(delta, "role")
-                        if safe_get(delta, "content"):
-                            need_function_call = False
-                            content = delta["content"]
-                            full_response += content
-                            yield content
-                        if safe_get(delta, "tool_calls"):
-                            need_function_call = True
-                            function_call_name = function_call_name or safe_get(delta, "tool_calls", 0, "function", "name")
-                            function_full_response += safe_get(delta, "tool_calls", 0, "function", "arguments", default="")
-                            function_call_id = function_call_id or safe_get(delta, "tool_calls", 0, "id")
 
-                if full_response == "" and function_full_response == "":
-                    print("error: full_response or is empty", "full_response", full_response, "function_full_response", function_full_response)
-                    continue
-                else:
-                    break
+                    if response.status_code != 200:
+                        await response.aread()
+                        raise Exception(f"{response.status_code} {response.reason_phrase} {response.text[:400]}")
+
+                    # 处理响应流
+                    async for chunk in self._process_stream_response(
+                        response.aiter_lines(),
+                        convo_id=convo_id,
+                        function_name=function_name,
+                        total_tokens=total_tokens,
+                        function_arguments=function_arguments,
+                        function_call_id=function_call_id,
+                        model=model,
+                        language=language,
+                        system_prompt=system_prompt,
+                        pass_history=pass_history,
+                        is_async=True,
+                        **kwargs
+                    ):
+                        yield chunk
+
+                break
             except Exception as e:
                 print(f"发生了未预料的错误：{e}")
                 import traceback
                 traceback.print_exc()
                 if "Invalid URL" in str(e):
-                    e = "You have entered an invalid API URL, please use the correct URL and use the `/start` command to set the API URL again. Specific error is as follows:\n\n" + str(e)
+                    e = "您输入了无效的API URL，请使用正确的URL并使用`/start`命令重新设置API URL。具体错误如下：\n\n" + str(e)
                     raise Exception(f"{e}")
                 raise Exception(f"{e}")
-        if self.print_log:
-            print("\n\rtotal_tokens", total_tokens)
-        if response_role == None:
-            response_role = "assistant"
-        if need_function_call:
-            function_full_response = check_json(function_full_response)
-            print("function_full_response", function_full_response)
-            function_response = ""
-            # print(self.function_calls_counter)
-            if not self.function_calls_counter.get(function_call_name):
-                self.function_calls_counter[function_call_name] = 1
-            else:
-                self.function_calls_counter[function_call_name] += 1
-            if self.function_calls_counter[function_call_name] <= self.function_call_max_loop and (function_full_response != "{}" or function_call_name == "get_date_time_weekday"):
-                function_call_max_tokens = self.truncate_limit - 1000
-                if function_call_max_tokens <= 0:
-                    function_call_max_tokens = int(self.truncate_limit / 2)
-                print("\033[32m function_call", function_call_name, "max token:", function_call_max_tokens, "\033[0m")
-                async for chunk in get_tools_result_async(function_call_name, function_full_response, function_call_max_tokens, model or self.engine, chatgpt, kwargs.get('api_key', self.api_key), self.api_url, use_plugins=False, model=model or self.engine, add_message=self.add_to_conversation, convo_id=convo_id, language=language):
-                    if "function_response:" in chunk:
-                        function_response = chunk.replace("function_response:", "")
-                    else:
-                        yield chunk
-            else:
-                function_response = "无法找到相关信息，停止使用 tools"
-            response_role = "tool"
-            # print(self.conversation[convo_id][-1])
-            # if self.conversation[convo_id][-1]["role"] == "tool" and self.conversation[convo_id][-1]["name"] == "get_search_results":
-            #     mess = self.conversation[convo_id].pop(-1)
-                # print("Truncate message:", mess)
-            async for chunk in self.ask_stream_async(function_response, response_role, convo_id=convo_id, function_name=function_call_name, total_tokens=total_tokens, model=model or self.engine, function_arguments=function_full_response, function_call_id=function_call_id, api_key=kwargs.get('api_key', self.api_key), plugins=kwargs.get("plugins", PLUGINS), system_prompt=system_prompt):
-                yield chunk
-        else:
-            # if self.conversation[convo_id][-1]["role"] == "tool" and self.conversation[convo_id][-1]["name"] == "get_search_results":
-            #     mess = self.conversation[convo_id].pop(-1)
-            self.add_to_conversation(full_response, response_role, convo_id=convo_id, total_tokens=total_tokens, pass_history=pass_history)
-            self.function_calls_counter = {}
-            if pass_history <= 2 and len(self.conversation[convo_id]) >= 2 \
-            and (
-                "You are a translation engine" in self.conversation[convo_id][-2]["content"] \
-                or "You are a translation engine" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="") \
-                or "你是一位精通简体中文的专业翻译" in self.conversation[convo_id][-2]["content"] \
-                or "你是一位精通简体中文的专业翻译" in safe_get(self.conversation, convo_id, -2, "content", 0, "text", default="")
-            ):
-                self.conversation[convo_id].pop(-1)
-                self.conversation[convo_id].pop(-1)
 
     async def ask_async(
         self,
@@ -836,3 +721,101 @@ class chatgpt(BaseLLM):
             if "aclient" in keys:
                 keys.remove("aclient")
             self.__dict__.update({key: loaded_config[key] for key in keys})
+
+    def _handle_response_error_common(self, response_text, json_post):
+        """通用的响应错误处理逻辑，适用于同步和异步场景"""
+        try:
+            # 检查内容审核失败
+            if "Content did not pass the moral check" in response_text:
+                return json_post, False, f"内容未通过道德检查：{response_text[:400]}"
+
+            # 处理函数调用相关错误
+            if "function calling" in response_text:
+                if "tools" in json_post:
+                    del json_post["tools"]
+                if "tool_choice" in json_post:
+                    del json_post["tool_choice"]
+                return json_post, True, None
+
+            # 处理请求格式错误
+            elif "invalid_request_error" in response_text:
+                for index, mess in enumerate(json_post["messages"]):
+                    if type(mess["content"]) == list and "text" in mess["content"][0]:
+                        json_post["messages"][index] = {
+                            "role": mess["role"],
+                            "content": mess["content"][0]["text"]
+                        }
+                return json_post, True, None
+
+            # 处理角色不允许错误
+            elif "'function' is not an allowed role" in response_text:
+                if json_post["messages"][-1]["role"] == "tool":
+                    mess = json_post["messages"][-1]
+                    json_post["messages"][-1] = {
+                        "role": "assistant",
+                        "name": mess["name"],
+                        "content": mess["content"]
+                    }
+                return json_post, True, None
+
+            # 处理服务器繁忙错误
+            elif "Sorry, server is busy" in response_text:
+                for index, mess in enumerate(json_post["messages"]):
+                    if type(mess["content"]) == list and "text" in mess["content"][0]:
+                        json_post["messages"][index] = {
+                            "role": mess["role"],
+                            "content": mess["content"][0]["text"]
+                        }
+                return json_post, True, None
+
+            # 处理token超限错误
+            elif "is not possible because the prompts occupy" in response_text:
+                max_tokens = re.findall(r"only\s(\d+)\stokens", response_text)
+                if max_tokens:
+                    json_post["max_tokens"] = int(max_tokens[0])
+                    return json_post, True, None
+
+            # 默认移除工具相关设置
+            else:
+                if "tools" in json_post:
+                    del json_post["tools"]
+                if "tool_choice" in json_post:
+                    del json_post["tool_choice"]
+                return json_post, True, None
+
+        except Exception as e:
+            print(f"处理响应错误时出现异常: {e}")
+            return json_post, False, str(e)
+
+    def _handle_response_error_sync(self, response, json_post):
+        """处理API响应错误并相应地修改请求体（同步版本）"""
+        response_text = response.text
+
+        # 处理空响应
+        if response.status_code == 200 and response_text == "":
+            for index, mess in enumerate(json_post["messages"]):
+                if type(mess["content"]) == list and "text" in mess["content"][0]:
+                    json_post["messages"][index] = {
+                        "role": mess["role"],
+                        "content": mess["content"][0]["text"]
+                    }
+            return json_post, True
+
+        json_post, should_retry, error_msg = self._handle_response_error_common(response_text, json_post)
+
+        if error_msg:
+            raise Exception(f"{response.status_code} {response.reason} {error_msg}")
+
+        return json_post, should_retry
+
+    async def _handle_response_error(self, response, json_post):
+        """处理API响应错误并相应地修改请求体（异步版本）"""
+        await response.aread()
+        response_text = response.text
+
+        json_post, should_retry, error_msg = self._handle_response_error_common(response_text, json_post)
+
+        if error_msg:
+            raise Exception(f"{response.status_code} {response.reason_phrase} {error_msg}")
+
+        return json_post, should_retry
