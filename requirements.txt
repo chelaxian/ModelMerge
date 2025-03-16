@@ -1,6 +1,7 @@
 pytz
 pillow
 msgspec
+fastapi
 PyExecJS
 requests
 html2text
