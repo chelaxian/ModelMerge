@@ -56,6 +56,15 @@ class dalle3(BaseLLM):
         yield url
 
 def generate_image(text):
+    """
+    生成图像
+
+    参数:
+        text: 描述图像的文本
+
+    返回:
+        图像的URL
+    """
     dallbot = dalle3(api_key=f"{API}")
     for data in dallbot.generate(text):
         return data

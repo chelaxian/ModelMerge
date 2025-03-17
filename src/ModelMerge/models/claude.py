@@ -6,9 +6,8 @@ import tiktoken
 import requests
 
 from .base import BaseLLM
-from ..plugins import PLUGINS, get_tools_result_async
+from ..plugins import PLUGINS, get_tools_result_async, claude_tools_list
 from ..utils.scripts import check_json, safe_get, async_generator_to_sync
-from ..tools import claude_tools_list
 
 class claudeConversation(dict):
     def Conversation(self, index):

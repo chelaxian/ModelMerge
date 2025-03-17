@@ -6,8 +6,7 @@ import requests
 from .base import BaseLLM, BaseAPI
 
 import copy
-from ..plugins import PLUGINS, get_tools_result_async
-from ..tools import function_call_list
+from ..plugins import PLUGINS, get_tools_result_async, function_call_list
 from ..utils.scripts import safe_get
 
 

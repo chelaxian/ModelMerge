@@ -10,8 +10,7 @@ from pathlib import Path
 
 
 from .base import BaseLLM
-from ..tools import function_call_list
-from ..plugins import PLUGINS, get_tools_result_async
+from ..plugins import PLUGINS, get_tools_result_async, function_call_list
 from ..utils.scripts import check_json, safe_get, async_generator_to_sync
 from ..core.request import prepare_request_payload
 
@@ -355,8 +354,8 @@ class chatgpt(BaseLLM):
 
         # 处理函数调用
         if need_function_call:
-            function_full_response = check_json(function_full_response)
             print("function_full_response", function_full_response)
+            function_full_response = check_json(function_full_response)
             function_response = ""
 
             if not self.function_calls_counter.get(function_call_name):

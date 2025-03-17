@@ -165,7 +165,7 @@ def jina_ai_Web_crawler(url: str, isSearch=False) -> str:
     return result
 
 
-def compare_and_choose_content(url: str) -> str:
+def get_url_content(url: str) -> str:
     """
     比较 url_to_markdown 和 jina_ai_Web_crawler 的结果，选择更好的内容
 
@@ -255,7 +255,7 @@ for url in ['https://raw.githubusercontent.com/yym68686/ChatGPT-Telegram-Bot/mai
     # print('-----------------------------')
     # print(url_to_markdown(url))
     # print('-----------------------------')
-    best_content = compare_and_choose_content(url)
+    best_content = get_url_content(url)
 end_time = time.time()
 run_time = end_time - start_time
 # 打印运行时间

@@ -113,12 +113,12 @@ def jina_ai_Web_crawler(url: str, isSearch=False) -> str:
     # print(result + "\n\n")
     return result
 
-def compare_and_choose_content(url: str) -> str:
+def get_url_content(url: str) -> str:
     """
-    比较 url_to_markdown 和 jina_ai_Web_crawler 的结果，选择更好的内容
+    获取 url 的网页内容，以 markdown 格式返回给用户
 
     :param url: 要爬取的网页URL
-    :return: 选择的更好的内容
+    :return: 网页内容
     """
     markdown_content = url_to_markdown(url)
     # print(markdown_content)
@@ -278,7 +278,7 @@ async def get_url_text_list(keywords, search_url_num):
     threads = []
     for url in url_set_list:
         # url_search_thread = ThreadWithReturnValue(target=jina_ai_Web_crawler, args=(url,True,))
-        url_search_thread = ThreadWithReturnValue(target=compare_and_choose_content, args=(url,))
+        url_search_thread = ThreadWithReturnValue(target=get_url_content, args=(url,))
         # url_search_thread = ThreadWithReturnValue(target=Web_crawler, args=(url,True,))
         url_search_thread.start()
         threads.append(url_search_thread)
@@ -295,13 +295,24 @@ async def get_url_text_list(keywords, search_url_num):
     # return url_text_list
 
 # Plugins 搜索入口
-async def get_search_results(prompt: str, keywords):
-    print("keywords", keywords)
-    keywords = [item.replace("三行关键词是：", "") for item in keywords if "\\x" not in item if item != ""]
-    keywords = [prompt] + keywords
-    keywords = keywords[:3]
-    print("select keywords", keywords)
+async def get_search_results(query):
+    """
+    执行网络搜索并返回搜索结果文本
 
+    参数:
+        query: 查询语句，包含用户想要搜索的内容
+
+    返回:
+        异步生成器，依次产生:
+        - 搜索状态消息 ("message_search_stage_2", "message_search_stage_3", "message_search_stage_4")
+        - 最终的搜索结果文本列表
+
+    说明:
+        - 根据查询语句自动搜索结果
+        - 使用多线程并行抓取网页内容
+        - 在搜索过程中通过yield返回状态更新
+    """
+    keywords = query
     if len(keywords) == 3:
         search_url_num = 4
     if len(keywords) == 2:
@@ -315,11 +326,7 @@ async def get_search_results(prompt: str, keywords):
             yield chunk
         else:
             url_text_list = chunk
-        # url_text_list = yield chunk
-    # url_text_list = yield from get_url_text_list(keywords, search_url_num)
-    # useful_source_text = "\n\n".join(url_text_list)
     yield url_text_list
-    # return useful_source_text
 
 if __name__ == "__main__":
     os.system("clear")

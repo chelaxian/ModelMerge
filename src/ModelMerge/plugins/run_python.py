@@ -40,12 +40,61 @@ def check_code_safety(code):
     except SyntaxError:
         return False
 
-async def run_python_script(code, timeout=10):
+async def run_python_script(code):
+    """
+    执行 Python 代码
+
+    参数:
+        code: 要执行的 Python 代码字符串
+
+    返回:
+        执行结果字符串
+    """
+
+    timeout = 10
+    # 检查代码安全性
     if not check_code_safety(code):
         return "Code contains potentially dangerous operations.\n\n"
 
+    # 添加一段捕获代码，确保最后表达式的值会被输出
+    # 这种方式比 ast 解析更可靠
+    wrapper_code = """
+import sys
+_result = None
+
+def _capture_last_result(code_to_run):
+    global _result
+    namespace = {{}}
+    exec(code_to_run, namespace)
+    if "_last_expr" in namespace:
+        _result = namespace["_last_expr"]
+
+# 用户代码
+_user_code = '''
+{}
+'''
+
+# 处理用户代码，尝试提取最后一个表达式
+lines = _user_code.strip().split('\\n')
+if lines:
+    # 检查最后一行是否是表达式
+    last_line = lines[-1].strip()
+    if last_line and not last_line.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'try:', 'with ')):
+        if not any(last_line.startswith(kw) for kw in ['return', 'print', 'raise', 'assert', 'import', 'from ']):
+            if not last_line.endswith(':') and not last_line.endswith('='):
+                # 可能是表达式，修改它
+                lines[-1] = "_last_expr = " + last_line
+                _user_code = '\\n'.join(lines)
+
+_capture_last_result(_user_code)
+
+# 输出结果
+if _result is not None:
+    print("\\nResult:", repr(_result))
+""".format(code)
+
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
-        temp_file.write(code)
+        temp_file.write(wrapper_code)
         temp_file_name = temp_file.name
 
     try:

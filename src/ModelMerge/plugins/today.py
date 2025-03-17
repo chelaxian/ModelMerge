@@ -3,6 +3,12 @@ import pytz
 
 # Plugins 获取日期时间
 def get_date_time_weekday():
+    """
+    获取当前日期时间及星期几
+
+    返回:
+        包含当前日期时间及星期几的字符串
+    """
     tz = pytz.timezone('Asia/Shanghai')  # 为东八区设置时区
     now = datetime.datetime.now(tz)  # 获取东八区当前时间
     weekday = now.weekday()
