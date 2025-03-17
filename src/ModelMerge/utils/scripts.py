@@ -1,10 +1,29 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Полный скрипт для обработки различных типов сообщений в Telegram-боте
+Включает функции из scripts_new.py и дополнен недостающей функциональностью из scripts.py
+"""
+
+# Импорты
 import os
+import sys
 import json
 import base64
 import tiktoken
 import requests
 import urllib.parse
+import logging
+import asyncio
+import time
+import imghdr
+from io import BytesIO
 
+# Настройка логирования
+logger = logging.getLogger(__name__)
+
+# Функции для работы с текстом из scripts.py
 def get_encode_text(text, model_name):
     tiktoken.get_encoding("cl100k_base")
     model_name = "gpt-3.5-turbo"
@@ -26,7 +45,7 @@ def cut_message(message: str, max_tokens: int, model_name: str):
     encode_text = encoding.encode(message)
     return message, len(encode_text)
 
-import imghdr
+# Функции для работы с изображениями из scripts.py
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         file_content = image_file.read()
@@ -38,7 +57,7 @@ def encode_image(image_path):
         elif file_type in ['jpeg', 'jpg']:
             return f"data:image/jpeg;base64,{base64_encoded}"
         else:
-            raise ValueError(f"不支持的图片格式: {file_type}")
+            raise ValueError(f"Неподдерживаемый формат изображения: {file_type}")
 
 def get_doc_from_url(url):
     filename = urllib.parse.unquote(url.split("/")[-1])
@@ -100,22 +119,22 @@ def get_image_message(image_url, message, engine = None):
             )
     return message
 
-from io import BytesIO
+# Функция для работы с аудио из scripts.py
 def get_audio_message(file_bytes):
     try:
-        # 创建一个字节流对象
+        # Создаем байтовый поток
         audio_stream = BytesIO(file_bytes)
 
-        # 直接使用字节流对象进行转录
+        # Используем поток для транскрипции
         import config
         transcript = config.whisperBot.generate(audio_stream)
-        # print("transcript", transcript)
 
         return transcript
 
     except Exception as e:
-        return f"处理音频文件时出错： {str(e)}"
+        return f"Ошибка при обработке аудиофайла: {str(e)}"
 
+# Функция для работы с документами из scripts.py
 def Document_extract(docurl, docpath=None, engine = None):
     filename = docpath
     text = None
@@ -152,13 +171,14 @@ def Document_extract(docurl, docpath=None, engine = None):
         os.remove(docpath)
     return prompt
 
+# Функции для работы с JSON из scripts.py
 def split_json_strings(input_string):
-    # 初始化结果列表和当前 JSON 字符串
+    # Инициализируем список результатов и текущую JSON строку
     json_strings = []
     current_json = ""
     brace_count = 0
 
-    # 遍历输入字符串的每个字符
+    # Обходим входную строку посимвольно
     for char in input_string:
         current_json += char
         if char == '{':
@@ -166,15 +186,15 @@ def split_json_strings(input_string):
         elif char == '}':
             brace_count -= 1
 
-            # 如果花括号配对完成，我们找到了一个完整的 JSON 字符串
+            # Если фигурные скобки сбалансированы, найдена полная JSON строка
             if brace_count == 0:
-                # 尝试解析当前 JSON 字符串
+                # Пытаемся разобрать текущую JSON строку
                 try:
                     json.loads(current_json)
                     json_strings.append(current_json)
                     current_json = ""
                 except json.JSONDecodeError:
-                    # 如果解析失败，继续添加字符
+                    # Если разбор не удался, продолжаем добавлять символы
                     pass
     if json_strings == []:
         json_strings.append(input_string)
@@ -189,8 +209,8 @@ def check_json(json_data):
             json.loads(json_data)
             break
         except json.decoder.JSONDecodeError as e:
-            print("JSON error：", e)
-            print("JSON body", repr(json_data))
+            logger.error(f"JSON error: {e}")
+            logger.error(f"JSON body: {repr(json_data)}")
             if "Invalid control character" in str(e):
                 json_data = json_data.replace("\n", "\\n")
             elif "Unterminated string starting" in str(e):
@@ -207,6 +227,7 @@ def check_json(json_data):
                 json_data = '{"prompt": ' + json.dumps(json_data) + '}'
     return json_data
 
+# Функции для работы с китайским текстом из scripts.py
 def is_surrounded_by_chinese(text, index):
     left_char = text[index - 1]
     if 0 < index < len(text) - 1:
@@ -227,24 +248,16 @@ def claude_replace(text):
             text = replace_char(text, i, Punctuation_mapping[text[i]])
     return text
 
-def safe_get(data, *keys, default=None):
-    for key in keys:
-        try:
-            data = data[key] if isinstance(data, (dict, list)) else data.get(key)
-        except (KeyError, IndexError, AttributeError, TypeError):
-            return default
-    return data
-
-import asyncio
+# Асинхронная утилита из scripts.py
 def async_generator_to_sync(async_gen):
     """
-    将异步生成器转换为同步生成器的工具函数
-
+    Функция для преобразования асинхронного генератора в синхронный
+    
     Args:
-        async_gen: 异步生成器函数
-
+        async_gen: Асинхронная функция-генератор
+        
     Yields:
-        异步生成器产生的每个值
+        Каждое значение, созданное асинхронным генератором
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -261,18 +274,327 @@ def async_generator_to_sync(async_gen):
             yield chunk
 
     except Exception as e:
-        print(f"Error during async execution: {e}")
+        logger.error(f"Error during async execution: {e}")
         raise
     finally:
         try:
-            # 清理所有待处理的任务
+            # Очищаем все ожидающие задачи
             tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
             if tasks:
                 loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            logger.error(f"Error during cleanup: {e}")
+
+# Функции из scripts_new.py
+def CutNICK(update_text, update_message):
+    import config
+    botNick = config.NICK.lower() if config.NICK else None
+    botNicKLength = len(botNick) if botNick else 0
+
+    update_chat = update_message.chat
+    update_reply_to_message = update_message.reply_to_message
+    if botNick is None:
+        return update_text
+    else:
+        if update_text[:botNicKLength].lower() == botNick:
+            return update_text[botNicKLength:].strip()
+        else:
+            if update_chat.type == 'private' or (botNick and update_reply_to_message and update_reply_to_message.text and update_reply_to_message.from_user.is_bot and update_reply_to_message.sender_chat == None):
+                return update_text
+            else:
+                return None
+
+time_out = 600
+async def get_file_url(file, context):
+    file_id = file.file_id
+    new_file = await context.bot.get_file(file_id, read_timeout=time_out, write_timeout=time_out, connect_timeout=time_out, pool_timeout=time_out)
+    file_url = new_file.file_path
+    return file_url
+
+async def get_voice(file_id: str, context) -> str:
+    file_unique_id = file_id
+    filename_mp3 = f'{file_unique_id}.mp3'
+
+    try:
+        # Пробуем загрузить файл до 3 раз, чтобы избежать пустых файлов
+        file_bytes = None
+        for attempt in range(3):
+            try:
+                logger.info(f"Downloading voice file (attempt {attempt+1}/3)")
+                file = await context.bot.get_file(file_id)
+                file_bytes = await file.download_as_bytearray()
+                
+                # Проверяем размер файла
+                if len(file_bytes) > 100:  # Минимальный размер валидного аудиофайла
+                    logger.info(f"Successfully downloaded voice file, size: {len(file_bytes)} bytes")
+                    break
+                else:
+                    logger.warning(f"Downloaded empty or too small voice file on attempt {attempt+1}/3, size: {len(file_bytes)} bytes")
+                    # Добавляем небольшую задержку перед повторной попыткой
+                    await asyncio.sleep(1)
+                    file_bytes = None
+            except Exception as e:
+                logger.error(f"Error downloading voice file (attempt {attempt+1}/3): {str(e)}")
+                await asyncio.sleep(1)
+        
+        # Если после всех попыток файл всё еще пустой или слишком маленький
+        if file_bytes is None or len(file_bytes) <= 100:
+            logger.error(f"Failed to download valid voice file after 3 attempts")
+            return "Не удалось загрузить голосовое сообщение. Пожалуйста, попробуйте ещё раз."
+
+        # Создаем объект байтового потока для передачи файла
+        audio_stream = BytesIO(file_bytes)
+        audio_stream.name = "audio.mp3"  # Задаем имя файла для multipart/form-data
+
+        # Получаем API ключ из конфигурации
+        import config
+        api_key = config.API
+
+        # Если локальный whisperBot доступен, попробуем его использовать сначала
+        if hasattr(config, 'whisperBot') and config.whisperBot:
+            try:
+                logger.info("Using local whisperBot for transcription")
+                # Создаем новый BytesIO, чтобы сбросить позицию чтения на начало
+                local_audio_stream = BytesIO(file_bytes)
+                transcript = config.whisperBot.generate(local_audio_stream)
+                if transcript and not transcript.startswith("error:"):
+                    return transcript
+                logger.warning(f"Local whisperBot failed: {transcript}")
+            except Exception as local_e:
+                logger.error(f"Local whisperBot error: {str(local_e)}")
+                # Продолжаем с внешним API
+        
+        # Используем 1min-relay API для транскрипции
+        logger.info("Using 1min-relay API for transcription")
+        # Устанавливаем 1min-relay API URL
+        # По умолчанию предполагаем, что он запущен на локальном хосте на порту 5001
+        api_url = "http://localhost:5001/v1/audio/transcriptions"
+        
+        # До 3 попыток отправки запроса к API
+        for api_attempt in range(3):
+            try:
+                # Сбрасываем позицию чтения на начало файла перед каждой попыткой
+                audio_stream.seek(0)
+                
+                # Подготавливаем файл для отправки
+                files = {
+                    'file': ('audio.mp3', audio_stream, 'audio/mpeg')
+                }
+                
+                # Подготавливаем данные формы
+                data = {
+                    'model': 'whisper-1',
+                }
+                
+                # Подготавливаем заголовки
+                headers = {
+                    'Authorization': f'Bearer {api_key}',
+                }
+                
+                # Отправляем запрос
+                logger.info(f"Sending transcription request to {api_url} (attempt {api_attempt+1}/3)")
+                response = requests.post(api_url, files=files, data=data, headers=headers, timeout=30)
+                
+                # Проверяем ответ
+                if response.status_code == 200:
+                    response_data = response.json()
+                    logger.info(f"Received transcription response: {json.dumps(response_data)[:200]}...")
+                    
+                    # Сохраняем ответ для отладки
+                    try:
+                        with open('last_transcription_response.json', 'w', encoding='utf-8') as f:
+                            json.dump(response_data, f, ensure_ascii=False, indent=2)
+                    except Exception as save_e:
+                        logger.error(f"Error saving response to file: {str(save_e)}")
+                    
+                    # Извлекаем текст из ответа в формате OpenAI API
+                    if 'choices' in response_data and len(response_data['choices']) > 0:
+                        transcript = response_data['choices'][0]['message']['content']
+                        logger.info(f"Extracted full transcript from choices: '{transcript}'")
+                        # Проверяем, есть ли в транскрипции полезная информация
+                        if not transcript or transcript.strip() in ["", ".", ",", "?", "!"]:
+                            logger.warning(f"Empty or minimal transcript detected: '{transcript}'")
+                            if api_attempt < 2:
+                                continue
+                            return "Не удалось распознать текст в голосовом сообщении. Пожалуйста, попробуйте говорить чётче."
+                        return transcript
+                    # Вторая возможная структура ответа
+                    elif 'aiRecord' in response_data and 'aiRecordDetail' in response_data['aiRecord']:
+                        details = response_data['aiRecord']['aiRecordDetail']
+                        if 'resultObject' in details:
+                            result_obj = details['resultObject']
+                            if isinstance(result_obj, list) and result_obj:
+                                transcript = "".join(result_obj)
+                                logger.info(f"Extracted full transcript from aiRecord list: '{transcript}'")
+                                # Проверка на пустую транскрипцию
+                                if not transcript or transcript.strip() in ["", ".", ",", "?", "!"]:
+                                    logger.warning(f"Empty or minimal transcript from aiRecord detected: '{transcript}'")
+                                    if api_attempt < 2:
+                                        continue
+                                    return "Не удалось распознать текст в голосовом сообщении. Пожалуйста, попробуйте говорить чётче."
+                                return transcript
+                            elif isinstance(result_obj, str):
+                                transcript = result_obj
+                                logger.info(f"Extracted full transcript from aiRecord string: '{transcript}'")
+                                # Проверка на пустую транскрипцию
+                                if not transcript or transcript.strip() in ["", ".", ",", "?", "!"]:
+                                    logger.warning(f"Empty or minimal transcript from aiRecord string detected: '{transcript}'")
+                                    if api_attempt < 2:
+                                        continue
+                                    return "Не удалось распознать текст в голосовом сообщении. Пожалуйста, попробуйте говорить чётче."
+                                return transcript
+                    else:
+                        logger.warning(f"Invalid response format (attempt {api_attempt+1}/3): {response_data}")
+                        if api_attempt == 2:  # Последняя попытка
+                            return "Не удалось распознать голосовое сообщение. Попробуйте еще раз."
+                else:
+                    logger.error(f"Error from API (attempt {api_attempt+1}/3): {response.status_code} - {response.text}")
+                    if api_attempt < 2:  # Не последняя попытка
+                        await asyncio.sleep(2)  # Ждем перед повторной попыткой
+                    else:
+                        return f"Ошибка распознавания голосового сообщения: HTTP {response.status_code}"
+            
+            except Exception as api_e:
+                logger.error(f"API request error (attempt {api_attempt+1}/3): {str(api_e)}")
+                if api_attempt < 2:  # Не последняя попытка
+                    await asyncio.sleep(2)  # Ждем перед повторной попыткой
+                else:
+                    return f"Ошибка при отправке запроса на распознавание: {str(api_e)}"
+
+        # Если мы дошли до этой точки, значит все попытки не удались
+        return "Не удалось распознать голосовое сообщение после нескольких попыток. Пожалуйста, попробуйте позже."
+
+    except Exception as e:
+        logger.error(f"Voice transcription error: {str(e)}")
+        return f"Временно невозможно использовать голосовую функцию: {str(e)}"
+    finally:
+        if os.path.exists(filename_mp3):
+            os.remove(filename_mp3)
+
+# Функции для обработки сообщений
+async def GetMesage(update_message, context, voice=True):
+    image_url = None
+    file_url = None
+    reply_to_message_text = None
+    message = None
+    rawtext = None
+    voice_text = None
+    reply_to_message_file_content = None
+
+    chatid = str(update_message.chat_id)
+    if update_message.is_topic_message:
+        message_thread_id = update_message.message_thread_id
+    else:
+        message_thread_id = None
+    if message_thread_id:
+        convo_id = str(chatid) + "_" + str(message_thread_id)
+    else:
+        convo_id = str(chatid)
+
+    messageid = update_message.message_id
+
+    # Добавляем логирование для отладки голосовых сообщений
+    if update_message.voice:
+        logger.info(f"Voice message detected: ID={update_message.voice.file_id}, Duration={update_message.voice.duration}s")
+    
+    if update_message.text:
+        message = rawtext = CutNICK(update_message.text, update_message)
+
+    if update_message.reply_to_message:
+        reply_to_message_text = update_message.reply_to_message.text
+        reply_to_message_file = update_message.reply_to_message.document
+
+        if update_message.reply_to_message.photo:
+            photo = update_message.reply_to_message.photo[-1]
+            image_url = await get_file_url(photo, context)
+
+        if reply_to_message_file:
+            reply_to_message_file_url = await get_file_url(reply_to_message_file, context)
+            reply_to_message_file_content = Document_extract(reply_to_message_file_url, reply_to_message_file_url, None)
+
+    if update_message.photo:
+        photo = update_message.photo[-1]
+
+        image_url = await get_file_url(photo, context)
+
+        if update_message.caption:
+            message = rawtext = CutNICK(update_message.caption, update_message)
+
+    if voice and update_message.voice:
+        voice_id = update_message.voice.file_id
+        voice_text = await get_voice(voice_id, context)
+
+        if update_message.caption:
+            message = rawtext = CutNICK(update_message.caption, update_message)
+
+    if update_message.document:
+        file = update_message.document
+
+        file_url = await get_file_url(file, context)
+
+        if image_url == None and file_url and (file_url[-3:] == "jpg" or file_url[-3:] == "png" or file_url[-4:] == "jpeg"):
+            image_url = file_url
+
+        if update_message.caption:
+            message = rawtext = CutNICK(update_message.caption, update_message)
+
+    if update_message.audio:
+        file = update_message.audio
+
+        file_url = await get_file_url(file, context)
+
+        if image_url == None and file_url and (file_url[-3:] == "jpg" or file_url[-3:] == "png" or file_url[-4:] == "jpeg"):
+            image_url = file_url
+
+        if update_message.caption:
+            message = rawtext = CutNICK(update_message.caption, update_message)
+
+    return message, rawtext, image_url, chatid, messageid, reply_to_message_text, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text
+
+async def GetMesageInfo(update, context, voice=True):
+    if update.edited_message:
+        message, rawtext, image_url, chatid, messageid, reply_to_message_text, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text = await GetMesage(update.edited_message, context, voice)
+        update_message = update.edited_message
+    elif update.callback_query:
+        message, rawtext, image_url, chatid, messageid, reply_to_message_text, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text = await GetMesage(update.callback_query.message, context, voice)
+        update_message = update.callback_query.message
+    elif update.message:
+        message, rawtext, image_url, chatid, messageid, reply_to_message_text, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text = await GetMesage(update.message, context, voice)
+        update_message = update.message
+    else:
+        return None, None, None, None, None, None, None, None, None, None, None, None
+    return message, rawtext, image_url, chatid, messageid, reply_to_message_text, update_message, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text
+
+# Переопределение safe_get из scripts_new.py, сохраняем формат оригинала
+def safe_get(data, *keys):
+    for key in keys:
+        try:
+            data = data[key] if isinstance(data, (dict, list)) else data.get(key)
+        except (KeyError, IndexError, AttributeError, TypeError):
+            return None
+    return data
+
+# Функция для определения эмодзи
+def is_emoji(character):
+    if len(character) != 1:
+        return False
+
+    code_point = ord(character)
+
+    # Определяем диапазоны Юникода для эмодзи
+    emoji_ranges = [
+        (0x1F300, 0x1F5FF),  # Различные символы и пиктограммы
+        (0x1F600, 0x1F64F),  # Эмодзи
+        (0x1F680, 0x1F6FF),  # Транспорт и карты
+        (0x2600, 0x26FF),    # Различные символы
+        (0x2700, 0x27BF),    # Декоративные символы
+        (0x1F900, 0x1F9FF)   # Дополнительные символы и пиктограммы
+    ]
+
+    # Проверяем, входит ли код символа в любой из диапазонов эмодзи
+    return any(start <= code_point <= end for start, end in emoji_ranges)
 
 if __name__ == "__main__":
-    os.system("clear")
+    os.system("clear" if os.name == "posix" else "cls") 
